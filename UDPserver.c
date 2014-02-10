@@ -1,247 +1,213 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-#include <semaphore.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
 #include <sys/types.h>
-#include <netinet/in.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <errno.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <string.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <signal.h>
 #include <stdint.h>
-#include <unistd.h>
 
-#define MAX_NUM_LISTENER_ALLOWED 5
-#define FALSE 0
-#define TRUE 1
+#define _GNU_SOURCE
+#include <string.h>
+
+#define BUFFER_SIZE 256
+#define MAX_NUM_LISTENER_ALLOWED 10
 
 /*
- * Used to exit the program when CTRL - C is pressed.
+ * Identifies if the specified message is well-formed or not.
+ *
+ * msg - the message to be tested
+ *
+ * returns a value greater than 0 if the message is well formed and a value less than zero if it is not
  */
-void handler(int param)
+int wellFormed(char* msg)
 {
-	fprintf(stderr, "Exiting!\n");
-	exit(EXIT_SUCCESS);
+        int length = strlen(msg);
+
+        if (strcasecmp(msg, "<loadavg/>") == 0) {
+                if (length != 10) {
+                        return -1;
+                }
+                return 1;
+        }
+        if (strncasecmp(msg, "<echo>", 6) == 0) {
+                char* endStr = strstr(msg, "</echo>");
+                if (endStr == NULL)
+                        return -1;
+                if (endStr[7] != '\0')
+                        return -1;
+                return 1;
+        }
+
+        return -1;
 }
 
 /*
- * Processes a request from the client.
+ * Determines the load average and writes it as an XML formatted string into the specified string location.
+ *
+ * resp - memory for a text string to store the XML formatted string specifying load average information
  */
-void * processRequest(void *);
-
-int main()
+void getLoadAvgResp(char* resp)
 {
-	int listensockfd = 0;
-	int errCheck;
-	struct sockaddr_in servaddr;
-	signal(SIGINT, handler);
+        double resultRuntime[3];
 
-	//Creates a TCP socket.
-	listensockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if(listensockfd < 0)
-	{
-		fprintf(stderr, "Could not create socket!\n");
-		close(listensockfd);
-		return EXIT_FAILURE;
-	}
+        bzero(resp, BUFFER_SIZE);
 
-	//Allocates memory for hostname and hostptr.
-	char * hostname = malloc(sizeof(char) * 32);
-	if(hostname == NULL)
-	{
-		fprintf(stderr, "Could not allocate memory for 'hostname'!\n");
-		close(listensockfd);
-		return EXIT_FAILURE;
-	}
-	struct hostent * hostptr = malloc(sizeof(struct hostent));
-	if(hostptr == NULL)
-	{
-		fprintf(stderr, "Could not allocate memory for 'hostptr'!\n");
-		close(listensockfd);
-		return EXIT_FAILURE;
-	}
+        if (getloadavg(resultRuntime, 3) < 0) {
+                strcpy(resp, "<error>unable to obtain load average</error>");
+                return;
+        }
 
-	//Gets info about host running server.
-	errCheck = gethostname(hostname, 32);
-	if(errCheck != 0)
-	{
-		fprintf(stderr, "gethostname failed!\n");
-		close(listensockfd);
-		return EXIT_FAILURE;
-	}
-	hostptr = gethostbyname(hostname);
-
-	//Allows the host IP address to be retrieved.
-    	struct ifreq myFreq[20];
-    	struct ifconf ic;
-    	ic.ifc_len = sizeof(myFreq);
-    	ic.ifc_req = myFreq;
-	errCheck = ioctl(listensockfd, SIOCGIFCONF, &ic);
-    	if(errCheck != 0)
-	{
-		close(listensockfd);
-        	return EXIT_FAILURE;
-    	}
-
-	//Fills in destination address structure.
-	memset((void *) &servaddr, 0, (size_t)sizeof(servaddr));
-	servaddr.sin_family = (short)(AF_INET);
-	struct in_addr myAddr = ((struct sockaddr_in*)&myFreq[1].ifr_addr)->sin_addr;
-	memcpy((void *)& servaddr.sin_addr, (void *) &myAddr, hostptr->h_length);
-	//Dynamically binds port by assigning 0;
-	servaddr.sin_port = 0;
-
-	//Binds socket locally.
-	errCheck = bind(listensockfd, (const struct sockaddr *) &servaddr, (socklen_t)sizeof(servaddr));
-	if(errCheck != 0)
-	{
-		fprintf(stderr, "Could not bind socket!\n");
-		close(listensockfd);
-		return EXIT_FAILURE;
-	}
-	
-	//Listens on socket.
-	errCheck = listen(listensockfd, MAX_NUM_LISTENER_ALLOWED);
-	if(errCheck != 0)
-	{
-		fprintf(stderr, "Could not listen!\n");
-		close(listensockfd);
-	}
-	
-	//Prtints the host name, IP address, and port #.
-	struct sockaddr_in printSock;
-	socklen_t addrLen = sizeof(struct sockaddr);
-	getsockname(listensockfd, (struct sockaddr *) &printSock, &addrLen); 
-	fprintf(stderr, "Host name: %s\n", hostname);
-    	fprintf(stderr, "IP address: %s\n", inet_ntoa(((struct sockaddr_in*)&myFreq[1].ifr_addr)->sin_addr));
-	fprintf(stderr, "Socket port = %d\n", ntohs(printSock.sin_port));
-	
-	//Accepts incoming connections.
-	struct sockaddr_in clientAddress;
-	int mysockfd;
-	socklen_t clientLength = sizeof(clientAddress);
-	pthread_t tid[2];
-	int threadCount = 0;
-	while(1)
-	{
-		mysockfd = accept(listensockfd, (struct sockaddr *) &clientAddress, &clientLength);
-		threadCount++;
-		pthread_create(&tid[threadCount-1], NULL, processRequest, (void *)(intptr_t)mysockfd);
-		threadCount--;
-	}
-
-	return EXIT_SUCCESS;
+        sprintf(resp, "<replyLoadAvg>%f:%f:%f</replyLoadAvg>", resultRuntime[0], resultRuntime[1], resultRuntime[2]);
 }
 
-void * processRequest(void * mySock)
+/*
+ * Generates a response to a request message in accordance with the given protocol in the project documentation.
+ * The request message is assumed to be in a correct format.
+ *
+ * msg - the message that specifies the request from a client
+ * resp - memory for a text string to store the response to a request
+ */
+void getResponse(char* msg, char* resp)
 {
-	int aSock = (intptr_t)mySock;
-	int errCheck, count, count2;
-	char buffer[256];
-	char message[256];
-	char reply[256];
-	bzero(buffer,256);
-	bzero(message,256);
-	bzero(reply,256);
-	char myNull = '\0';
+        bzero(resp, BUFFER_SIZE);
 
-	//Reads from the socket.
-	errCheck = read(aSock, buffer, 255);
-	if(errCheck < 0)
-	{
-        	fprintf(stderr, "Error reading from socket\n");
-		close(aSock);
-        	return NULL;
-	}
+        if (strcasecmp(msg, "<loadavg/>") == 0) {
+                getLoadAvgResp(resp);
+                return;
+        }
 
-	//Checks to see if the message is an <echo>.
-	if(buffer[0] == '<' && buffer[1] == 'e' && buffer[2] == 'c' && buffer[3] == 'h' && buffer[4] == 'o' && buffer[5] == '>' && buffer[6] != ' ')
-	{
-		//Reads the message body into a buffer.
-		count = 6;
-		while(buffer[count] != '<' && buffer[count] != '\0')
-		{
-			message[count - 6] = buffer[count];
-			count++;
-		}
-		message[count - 6] = myNull;
+        if (strncasecmp(msg, "<echo>", 6) == 0) {
+                int payLoadLength = strlen(msg)-13;
+                strcpy(resp, "<reply>");
+                strncpy(&resp[7], &msg[6], payLoadLength);
+                strcpy(&resp[7+payLoadLength], "</reply>");
+                return;
+        }
 
-		//Checks that the message ends with </echo> and does not continue.
-		if(message[count - 7] != ' ' && buffer[count] == '<' && buffer[count + 1] == '/' && buffer[count + 2] == 'e' && buffer[count + 3] == 'c' && buffer[count + 4] == 'h' && buffer[count + 5] == 'o' && buffer[count + 6] == '>' && buffer[count + 7] == '\0')
-		{
-			//Writes the echo response to the socket.
-			char * tempChar;
-			tempChar = malloc(sizeof(char) * 7);
-			sprintf(tempChar, "<reply>");
-			memcpy(&reply, tempChar, (sizeof(char) * 7));
-			count2 = count - 6;
-			for(count = 0; count < count2; count++)
-				reply[count + 7] = message[count];
-			tempChar = malloc(sizeof(char) * 9);
-			sprintf(tempChar, "</reply>%c", myNull);
-			memcpy(&reply[count + 7], tempChar, (sizeof(char) * 9));
-			
-			errCheck = write(aSock, reply, sizeof(reply));
-			if(errCheck < 0) 
-			{
-		        	fprintf(stderr, "Error writing to socket\n");
-				close(aSock);
-		        	return NULL;
-			}
-			close(aSock);
-			return NULL;
-		}
-	}
-	//Checks if the message is just <loadavg/> with no extra characters (as loadavg should be).
-	else if(strcmp(buffer, "<loadavg/>") == 0)
-	{
-		//Writes the loadavg response to the socket.
-		double loadavg[3];
-		char * tempChar;
-		errCheck = getloadavg(loadavg, 3);
-		if(errCheck > 0)
-		{
-			tempChar = malloc(sizeof(char) * 9);
-			sprintf(tempChar, "<loadavg>");
-			memcpy(&reply, tempChar, (sizeof(char) * 9));
-			tempChar = malloc(sizeof(char) * 8);
-			sprintf(tempChar, "%lf", loadavg[0]);
-			memcpy(&reply[9], tempChar, (sizeof(char) * 8));
-			reply[13] = ';';
-			sprintf(tempChar, "%lf", loadavg[1]);
-			memcpy(&reply[14], tempChar, (sizeof(char) * 8));
-			reply[18] = ';';
-			sprintf(tempChar, "%lf", loadavg[2]);
-			memcpy(&reply[19], tempChar, (sizeof(char) * 8));
-			tempChar = malloc(sizeof(char) * 11);
-			sprintf(tempChar, "</loadavg>%c", myNull);
-			memcpy(&reply[23], tempChar, (sizeof(char) * 11));
-			
-			errCheck = write(aSock, reply, sizeof(reply));
-			if(errCheck < 0) 
-			{
-		        	fprintf(stderr, "Error writing to socket\n");
-				close(aSock);
-		        	return NULL;
-			}
-			close(aSock);
-			return NULL;
-		}
-	}
+        if(strcasecmp(msg, "<shutdown/>") == 0)
+        {
+                fprintf(stderr, "Closing socket & terminating...\n");
 
-	//Writes an error message to the socket if the message was not correctly formatted.
-	sprintf(reply, "<error>unknown format</echo>%c", myNull);
-	errCheck = write(aSock, reply, sizeof(reply));
-	if(errCheck < 0) 
-	{
-        	fprintf(stderr, "Error writing to socket\n");
-		close(aSock);
-        	return NULL;
-	}
-	close(aSock);
-	return NULL;
+                exit(0);
+        }
+}
+
+/*
+ * Writes an error message into the specified character array.
+ *
+ * msg - memory for a text string to store the error message
+ */
+void createError(char* msg)
+{
+        bzero(msg, BUFFER_SIZE);
+        strcpy(msg, "<error>unknown format</error>");
+}
+
+/*
+ * Prints the host name of the machine to the screen and returns the port #.
+ */
+int printHostInfo(int argc, char ** argv)
+{
+        int portNum = -1;
+        if(argc == 2)
+                portNum = atoi(argv[1]);
+        else
+        {
+                fprintf(stderr, "Invalid number of argumnets! Need 1 port #\n");
+                exit(0);
+        }
+        // getting host name and use static port binding
+        char hostname[128];
+        gethostname(hostname, 128);
+        fprintf (stderr, "Hostname: %s\n", hostname);
+
+        return portNum;
+}
+
+/*
+ * Creates a socket and binds it statically. Port information of the bound socket is returned.
+ */
+int createSocket(int portNum)
+{
+        struct sockaddr_in servaddr;
+        int                listensockfd;
+
+        // creating a streaming server socket
+        listensockfd = socket (AF_INET, SOCK_DGRAM, 0);
+        if (listensockfd < 0) {
+                return -1;
+        }
+
+        // build local address and set port to unknown
+        memset ((void *) &servaddr, 0, (size_t)sizeof(servaddr));
+        servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        servaddr.sin_port = htons(portNum);
+
+        // bind statically
+        bind (listensockfd, (struct sockaddr *) &servaddr, (socklen_t)sizeof(servaddr));
+
+        // retrieve port information
+        struct sockaddr_in boundAddr;
+        socklen_t          sizeAddr = sizeof(boundAddr);
+        getsockname(listensockfd, (struct sockaddr *) &boundAddr, &sizeAddr);
+        fprintf(stderr, "Port #: %d\n", ntohs(boundAddr.sin_port));
+
+        return listensockfd;
+}
+
+/*
+ * Implements the request handler executed within a thread.
+ */
+void reqHandler(int sockValue, char * message, int recLength, struct sockaddr_in cliAddr, int cliLength)
+{
+        int  sockfd = sockValue;
+        char resp[BUFFER_SIZE];
+
+        if (wellFormed(message) < 0) {
+                createError(resp);
+        }
+        else {
+                getResponse(message, resp);
+        }
+        if(sendto(sockfd, resp, recLength, 0, (struct sockaddr *)&cliAddr, cliLength) < 0)
+                fprintf(stderr, "Could not send response!\n");
+        fprintf(stderr, "Sent response %s\n", resp);
+
+        close (sockfd);
+}
+
+/*
+ * The main program that starts up the server.
+ * No parameters are processed.
+ */
+int main(int argc, char** argv)
+{
+        int listensockfd, cliLength, recLength;
+        struct sockaddr_in cliAddr;
+        char message[256];
+
+        //Provides host inforation on screen and creates a datagram server socket
+        listensockfd = createSocket(printHostInfo(argc, argv));
+        if (listensockfd < 0) {
+                perror ("cannot create socket");
+                exit (1);
+        }
+        while(1)
+        {
+fprintf(stderr, "Starting... ");
+                cliLength = sizeof(cliAddr);
+                recLength = recvfrom(listensockfd, message, 256, 0, (struct sockaddr *)&cliAddr, (socklen_t *)&cliLength);
+                message[recLength] = '\0';
+fprintf(stderr, "recieved, ... ");
+                reqHandler(listensockfd, message, recLength, cliAddr, cliLength);
+fprintf(stderr, "done!\n");
+        }
 }

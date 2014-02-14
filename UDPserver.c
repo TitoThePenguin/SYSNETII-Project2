@@ -214,7 +214,6 @@ int main(int argc, char** argv)
                 cliLength = sizeof(cliAddr);
                 recLength = recvfrom(listensockfd, message, 256, 0, (struct sockaddr *)&cliAddr, (socklen_t *)&cliLength);
                 message[recLength] = '\0';
-                fprintf(stderr, "M: %s\n", message);
                 reqHandler(listensockfd, message, recLength, cliAddr, cliLength);
         }
 }
